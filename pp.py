@@ -5,22 +5,23 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
-app.secret_key = 'pawpals_secret_key_safe_123'
+app.secret_key = os.environ.get('SECRET_KEY', 'pawpals_secret_key_safe_123')
 
-# ⚠️ ใส่เบอร์โทรศัพท์ หรือ เลขบัตรประชาชนที่ผูก PromptPay จริงตรงนี้ (ตัดขีดออก)
-PROMPTPAY_NUMBER = "0818565072" 
+# ⚠️ เบอร์พร้อมเพย์
+PROMPTPAY_NUMBER = "0812345678" 
 
-# ตั้งค่าโฟลเดอร์สำหรับเก็บไฟล์สลิปโอนเงิน
-UPLOAD_FOLDER = 'static/slips'
+# ตั้งค่าโฟลเดอร์สลิป
+UPLOAD_FOLDER = os.path.join(app.root_path, 'static', 'slips')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# ตั้งค่าฐานข้อมูล SQLite (เปลี่ยนชื่อไฟล์ใหม่เพื่อเลี่ยงปัญหาไฟล์ล็อค)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///pawpals_v2.db'
+# ตั้งค่าฐานข้อมูล SQLite
+db_path = os.path.join(app.root_path, 'instance', 'pawpals_v3.db')
+os.makedirs(os.path.dirname(db_path), exist_ok=True)
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-# --- ตารางข้อมูลฐานข้อมูล ---
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
@@ -38,7 +39,10 @@ class Booking(db.Model):
     deposit = db.Column(db.Integer, nullable=False)
     slip_file = db.Column(db.String(200), nullable=True)
 
-# --- แม่แบบหน้าเว็บ HTML ---
+# สร้างตารางฐานข้อมูลอัตโนมัติทุกครั้งที่แอปเริ่มทำงาน (รองรับ Gunicorn บน Render)
+with app.app_context():
+    db.create_all()
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="th">
@@ -138,7 +142,6 @@ HTML_TEMPLATE = """
             </div>
 
         {% elif page == 'home' %}
-            <!-- แถบกล้อง Real-Time -->
             <div class="card p-3 mb-4 bg-dark text-white">
                 <div class="d-flex justify-content-between align-items-center mb-2">
                     <h5 class="mb-0 fw-bold">🎥 ดูน้องๆ แบบ Real-Time 24 ชม.</h5>
@@ -161,7 +164,6 @@ HTML_TEMPLATE = """
             </div>
 
             <div class="row">
-                <!-- ฟอร์มจอง -->
                 <div class="col-md-6 mb-4">
                     <div class="card p-4">
                         <h4 class="fw-bold mb-3 text-success">📅 จองบริการ PawPals & ชำระเงิน</h4>
@@ -203,14 +205,14 @@ HTML_TEMPLATE = """
                                 </div>
                             </div>
 
-                            <!-- ส่วน QR Code ชำระเงินจริง -->
                             <div class="p-3 bg-light rounded mb-3 border text-center">
                                 <h6 class="fw-bold text-dark mb-2">💳 สแกนโอนเงินมัดจำ PromptPay</h6>
                                 <p class="mb-1 text-muted">ราคารวม: <strong id="totalDisplay" class="text-dark">600</strong> บาท</p>
                                 <p class="mb-2 text-danger">ยอดมัดจำ (50%): <strong id="depositDisplay" class="text-danger fs-5">300</strong> บาท</p>
                                 
-                                <img id="qrImage" src="https://promptpay.io/{{ promptpay_no }}/300.png" alt="PromptPay QR" class="img-thumbnail my-2" style="width: 170px;">
-                                <small class="d-block text-muted">เปิดแอปธนาคารสแกนได้ทันที (ขึ้นชื่อบัญชีและยอดมัดจำให้อัตโนมัติ)</small>
+                                <img id="qrImage" src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=PromptPay-{{ promptpay_no }}-300" alt="PromptPay QR" class="img-thumbnail my-2" style="width: 170px;">
+                                <p class="small text-primary fw-bold mb-0">พร้อมเพย์: {{ promptpay_no }}</p>
+                                <small class="d-block text-muted">เปิดแอปธนาคารสแกน หรือโอนตามเบอร์ด้านบน</small>
 
                                 <div class="mt-3 text-start">
                                     <label class="form-label fw-bold text-dark">แนบสลิปการโอนเงิน</label>
@@ -223,7 +225,6 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
 
-                <!-- แสดงประวัติการจอง -->
                 <div class="col-md-6">
                     <div class="card p-4">
                         <h4 class="fw-bold mb-3">📋 ประวัติการจอง</h4>
@@ -271,9 +272,8 @@ HTML_TEMPLATE = """
                     document.getElementById("totalDisplay").innerText = price;
                     document.getElementById("depositDisplay").innerText = deposit;
                     
-                    // เปลี่ยนยอดเงินใน QR Code พร้อมเปย์ตามบริการที่เลือกอัตโนมัติ
                     var ppNo = "{{ promptpay_no }}";
-                    document.getElementById("qrImage").src = "https://promptpay.io/" + ppNo + "/" + deposit + ".png";
+                    document.getElementById("qrImage").src = "https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=PromptPay-" + ppNo + "-" + deposit;
                 }
             </script>
         {% endif %}
@@ -282,7 +282,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- Routes ---
 @app.route('/')
 def home():
     if 'user_id' not in session:
@@ -369,6 +368,4 @@ def logout():
     return redirect(url_for('login'))
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
     app.run(debug=True)
